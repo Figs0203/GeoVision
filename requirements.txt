@@ -1,0 +1,14 @@
+torch
+torchvision
+transformers
+datasets
+pandas
+numpy
+tqdm
+matplotlib
+scikit-learn
+geopandas
+cartopy
+shapely
+albumentations
+pillow

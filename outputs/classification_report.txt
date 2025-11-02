@@ -1,0 +1,14 @@
+REPORTE DE CLASIFICACIÓN - MODELO VIT
+============================================================
+
+              precision    recall  f1-score   support
+
+      Africa     0.9630    0.8764    0.9176        89
+    Americas     0.7740    0.8164    0.7946      2282
+        Asia     0.8676    0.8415    0.8544       631
+      Europe     0.8087    0.7823    0.7953      2334
+     Oceania     0.8767    0.7619    0.8153       168
+
+    accuracy                         0.8041      5504
+   macro avg     0.8580    0.8157    0.8354      5504
+weighted avg     0.8056    0.8041    0.8044      5504

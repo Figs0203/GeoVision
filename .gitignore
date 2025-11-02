@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Datos e Imágenes (muy pesados)
+data/images_by_continent/
+data/pruebas/
+shards/shard_*.msg
+shards/images_shard*/
+*.jpg
+*.jpeg
+*.png
+*.gif
+!outputs/confusion_matrix.png
+
+# Modelos entrenados (muy pesados)
+outputs/checkpoints/
+
+# Archivos temporales
+*.log
+*.tmp
+*.cache
+
+# Sistema Operativo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# TensorFlow/PyTorch
+*.ckpt
+*.pth
+*.pt
+*.h5
+*.pb
+*.onnx
