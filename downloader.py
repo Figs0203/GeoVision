@@ -7,8 +7,8 @@ import pandas as pd
 
 # Configuración de directorios y nombres
 SHARD_FILE = "./shards/shard_0.msg"   # Modifica según la ubicación de tu shard
-SAVE_DIR = "./images_shard0"
-CSV_FILE = "shard0_coords.csv"
+SAVE_DIR = "./images"
+CSV_FILE = "coords.csv"
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 records = []

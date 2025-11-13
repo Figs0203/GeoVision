@@ -1,11 +1,11 @@
-# scripts/5_predict_image.py
+# scripts/6_predict_image.py
 """
 Predice el continente de una imagen usando el modelo ViT entrenado.
 
 Ejemplos de uso:
-    python scripts/5_predict_image.py --image data/test_image.jpg
-    python scripts/5_predict_image.py --image data/test_image.jpg --model outputs/checkpoints/vit-continent-balanced
-    python scripts/5_predict_image.py --image data/test_image.jpg --show
+    python scripts/6_predict_image.py --image data/test_image.jpg
+    python scripts/6_predict_image.py --image data/test_image.jpg --model outputs/checkpoints/vit-continent-balanced-scene-continent
+    python scripts/6_predict_image.py --image data/test_image.jpg --show
 """
 
 import argparse
@@ -18,8 +18,8 @@ import numpy as np
 
 
 def predict(
-    image_path: str, 
-    model_dir: str = "outputs/checkpoints/vit-continent-balanced",
+    image_path: str,
+    model_dir: str = "outputs/checkpoints/vit-continent-balanced-scene-continent",
     show_image: bool = False,
     show_probabilities: bool = False
 ):
@@ -69,19 +69,6 @@ def predict(
     
     # Obtener labels del modelo
     labels = list(model.config.id2label.values())
-    
-    # Si los labels son genéricos (LABEL_0, LABEL_1...), usar mapeo manual
-    if labels[0].startswith('LABEL_'):
-        print("Labels genéricos detectados, usando mapeo manual...")
-        # Orden basado en el dataset original
-        label_map = {
-            'LABEL_0': 'Africa',
-            'LABEL_1': 'Americas', 
-            'LABEL_2': 'Asia',
-            'LABEL_3': 'Europe',
-            'LABEL_4': 'Oceania'
-        }
-        labels = [label_map.get(label, label) for label in labels]
     
     print(f"Clases disponibles: {labels}")
 
@@ -159,15 +146,15 @@ if __name__ == "__main__":
         description="Predice el continente de una imagen usando el modelo ViT entrenado."
     )
     parser.add_argument(
-        "--image", 
-        type=str, 
-        required=True, 
+        "--image",
+        type=str,
+        required=True,
         help="Ruta a la imagen a predecir"
     )
     parser.add_argument(
-        "--model", 
-        type=str, 
-        default="outputs/checkpoints/vit-continent-balanced",
+        "--model",
+        type=str,
+        default="outputs/checkpoints/vit-continent-balanced-scene-continent",
         help="Ruta al directorio del modelo entrenado"
     )
     parser.add_argument(
