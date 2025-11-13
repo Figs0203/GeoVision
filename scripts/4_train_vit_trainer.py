@@ -8,33 +8,22 @@ import json
 import os
 from pathlib import Path
 from collections import Counter
-from typing import List, Optional
 
 import numpy as np
-import pandas as pd
+from PIL import Image
+from datasets import DatasetDict, load_dataset
 from transformers import (
     AutoImageProcessor,
     TrainingArguments,
     Trainer,
-    ViTModel,
+    ViTForImageClassification,
     EarlyStoppingCallback,
 )
-from transformers.modeling_outputs import SequenceClassifierOutput
 from sklearn.metrics import accuracy_score, f1_score
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
-
-from preprocessing.geo_dataset import (
-    GeoImageDataset,
-    LAT_BIN_SIZE,
-    LON_BIN_SIZE,
-    NUM_LAT_BINS,
-    NUM_LON_BINS,
-    UNKNOWN_BIN,
-)
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 
 # =====================
@@ -115,29 +104,10 @@ if not TRAIN_DIR.exists() or not TEST_DIR.exists():
         "Ejecuta 3_prepare_scene_dataset.py con generación de splits."
     )
 
-metadata_dir = Path("data/metadata")
-if TRAINING_MODE == "scene":
-    train_metadata_path = metadata_dir / f"train_{SCENE_TYPE}_metadata.csv"
-    test_metadata_path = metadata_dir / f"test_{SCENE_TYPE}_metadata.csv"
-else:
-    train_metadata_path = metadata_dir / "train_scene_continent_metadata.csv"
-    test_metadata_path = metadata_dir / "test_scene_continent_metadata.csv"
-
-if not train_metadata_path.exists() or not test_metadata_path.exists():
-    raise FileNotFoundError(
-        f"No se encontraron metadatos de entrenamiento ({train_metadata_path}) o prueba ({test_metadata_path}). "
-        "Ejecuta 3_prepare_scene_dataset.py para generarlos."
-    )
-
-train_meta_df = pd.read_csv(train_metadata_path)
-test_meta_df = pd.read_csv(test_metadata_path)
-
-label_names = sorted(train_meta_df["label_name"].unique())
-label_to_id = {name: idx for idx, name in enumerate(label_names)}
-train_meta_df["label_id"] = train_meta_df["label_name"].map(label_to_id)
-test_meta_df["label_id"] = test_meta_df["label_name"].map(label_to_id)
-
-print(f"Train: {len(train_meta_df)} imágenes, Test: {len(test_meta_df)} imágenes.")
+train_ds_hf = load_dataset("imagefolder", data_dir=str(TRAIN_DIR))["train"]
+test_ds_hf = load_dataset("imagefolder", data_dir=str(TEST_DIR))["train"]
+raw_ds = DatasetDict({"train": train_ds_hf, "test": test_ds_hf})
+print(f"Train: {len(train_ds_hf)} imágenes, Test: {len(test_ds_hf)} imágenes.")
 
 
 # =====================
@@ -172,102 +142,86 @@ print("Transformaciones configuradas correctamente.")
 
 
 # =====================
-# 4) Crear datasets Geo
+# 4) Custom PyTorch Dataset
 # =====================
-LAT_BINS_TOTAL = NUM_LAT_BINS + 1
-LON_BINS_TOTAL = NUM_LON_BINS + 1
+class ImageDataset(Dataset):
+    """Dataset personalizado que procesa imágenes on-the-fly."""
+    
+    def __init__(self, hf_dataset, transforms):
+        self.dataset = hf_dataset
+        self.transforms = transforms
+        
+        # Extraer todas las rutas e índices al inicio
+        self.samples = []
+        print(f"Preparando índice de {len(hf_dataset)} imágenes...")
+        for i in range(len(hf_dataset)):
+            example = hf_dataset[i]
+            self.samples.append({
+                'image': example['image'],
+                'label': example['label']
+            })
+        print(f"Índice creado: {len(self.samples)} imágenes")
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        
+        try:
+            # Cargar imagen
+            image_obj = sample['image']
+            if isinstance(image_obj, str):
+                with Image.open(image_obj) as img:
+                    image = img.convert("RGB").copy()
+            elif isinstance(image_obj, Image.Image):
+                image_obj.load()
+                image = image_obj.convert("RGB").copy()
+            else:
+                image = Image.fromarray(np.uint8(image_obj)).convert("RGB")
+            
+            # Aplicar transformaciones
+            np_image = np.array(image)
+            aug = self.transforms(image=np_image)
+            
+            return {
+                'pixel_values': aug['image'],
+                'labels': sample['label']
+            }
+        except Exception as e:
+            print(f"Error en imagen {idx}: {e}")
+            # Retornar una imagen en negro en caso de error
+            return {
+                'pixel_values': torch.zeros(3, 224, 224),
+                'labels': sample['label']
+            }
+
+
 print("\n[4/10] Creando datasets personalizados...")
-train_ds = GeoImageDataset(
-    metadata=train_meta_df,
-    root_dir=TRAIN_DIR,
-    transforms=train_transforms,
-    label_to_id=label_to_id,
-    lat_bins_total=LAT_BINS_TOTAL,
-    lon_bins_total=LON_BINS_TOTAL,
-)
-test_ds = GeoImageDataset(
-    metadata=test_meta_df,
-    root_dir=TEST_DIR,
-    transforms=test_transforms,
-    label_to_id=label_to_id,
-    lat_bins_total=LAT_BINS_TOTAL,
-    lon_bins_total=LON_BINS_TOTAL,
-)
+train_ds = ImageDataset(raw_ds['train'], train_transforms)
+test_ds = ImageDataset(raw_ds['test'], test_transforms)
 print("Datasets creados correctamente.")
 
 
 # =====================
-# 5) Modelo ViT con geolocalización
+# 5) Modelo ViT
 # =====================
-GEO_EMBED_DIM = 32
-
-
-class GeoViTForImageClassification(nn.Module):
-    def __init__(
-        self,
-        model_name: str,
-        num_labels: int,
-        label_names: List[str],
-        num_lat_bins: int,
-        num_lon_bins: int,
-        geo_embed_dim: int = 32,
-    ) -> None:
-        super().__init__()
-        self.backbone = ViTModel.from_pretrained(model_name)
-        hidden_size = self.backbone.config.hidden_size
-        self.lat_embedding = nn.Embedding(num_lat_bins, geo_embed_dim)
-        self.lon_embedding = nn.Embedding(num_lon_bins, geo_embed_dim)
-        self.dropout = nn.Dropout(self.backbone.config.hidden_dropout_prob)
-        self.classifier = nn.Linear(hidden_size + geo_embed_dim * 2, num_labels)
-        self.num_labels = num_labels
-        self.label_names = label_names
-        self.config = self.backbone.config
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        lat_bins: torch.Tensor,
-        lon_bins: torch.Tensor,
-        labels: Optional[torch.Tensor] = None,
-    ) -> SequenceClassifierOutput:
-        outputs = self.backbone(pixel_values=pixel_values)
-        pooled = outputs.pooler_output
-        lat_emb = self.lat_embedding(lat_bins)
-        lon_emb = self.lon_embedding(lon_bins)
-        fused = torch.cat([pooled, lat_emb, lon_emb], dim=-1)
-        fused = self.dropout(fused)
-        logits = self.classifier(fused)
-
-        loss = None
-        if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(logits, labels)
-
-        return SequenceClassifierOutput(loss=loss, logits=logits)
-
-
-print("\n[5/10] Cargando modelo base ViT con geofeatures...")
-num_labels = len(label_names)
-model = GeoViTForImageClassification(
-    model_name=MODEL_NAME,
-    num_labels=num_labels,
-    label_names=label_names,
-    num_lat_bins=LAT_BINS_TOTAL,
-    num_lon_bins=LON_BINS_TOTAL,
-    geo_embed_dim=GEO_EMBED_DIM,
-)
+print("\n[5/10] Cargando modelo base ViT...")
+num_labels = len(raw_ds['train'].features['label'].names)
+model = ViTForImageClassification.from_pretrained(MODEL_NAME, num_labels=num_labels)
 print(f"Modelo cargado con {num_labels} clases.")
-print("Clases detectadas:", label_names)
+print("Clases detectadas:", raw_ds['train'].features['label'].names)
 
 
 # =====================
 # 6) Calcular pesos y crear sampler
 # =====================
 print("\n[6/10] Calculando pesos para balancear clases...")
-labels = train_meta_df["label_id"].tolist()
+labels = [sample['label'] for sample in train_ds.samples]
 label_counts = Counter(labels)
 total_count = sum(label_counts.values())
 
+# peso = total_imágenes / (num_clases * imágenes_de_esa_clase)
 weights = {cls: total_count / (len(label_counts) * count) for cls, count in label_counts.items()}
 sample_weights = [weights[label] for label in labels]
 sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
@@ -275,7 +229,7 @@ sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights),
 print("Sampler creado con pesos balanceados.")
 print("Distribución de clases:")
 for cls, count in label_counts.items():
-    name = label_names[cls]
+    name = raw_ds['train'].features['label'].names[cls]
     print(f" - {name}: {count} imágenes (peso {weights[cls]:.3f})")
 
 
@@ -284,15 +238,11 @@ for cls, count in label_counts.items():
 # =====================
 def collate_fn(batch):
     """Combina ejemplos individuales en un batch."""
-    pixel_values = torch.stack([item["pixel_values"] for item in batch])
-    labels = torch.tensor([item["labels"] for item in batch], dtype=torch.long)
-    lat_bins = torch.tensor([item["lat_bins"] for item in batch], dtype=torch.long)
-    lon_bins = torch.tensor([item["lon_bins"] for item in batch], dtype=torch.long)
+    pixel_values = torch.stack([item['pixel_values'] for item in batch])
+    labels = torch.tensor([item['labels'] for item in batch])
     return {
-        "pixel_values": pixel_values,
-        "labels": labels,
-        "lat_bins": lat_bins,
-        "lon_bins": lon_bins,
+        'pixel_values': pixel_values,
+        'labels': labels
     }
 
 
@@ -390,16 +340,7 @@ metadata = {
     "scene_type": SCENE_TYPE if TRAINING_MODE == "scene" else None,
     "train_dir": str(TRAIN_DIR),
     "test_dir": str(TEST_DIR),
-    "train_metadata": str(train_metadata_path),
-    "test_metadata": str(test_metadata_path),
     "checkpoint_dir": str(OUT_DIR),
-    "label_names": label_names,
-    "num_lat_bins": LAT_BINS_TOTAL,
-    "num_lon_bins": LON_BINS_TOTAL,
-    "lat_bin_size": LAT_BIN_SIZE,
-    "lon_bin_size": LON_BIN_SIZE,
-    "geo_embed_dim": GEO_EMBED_DIM,
-    "model_name": MODEL_NAME,
 }
 metadata_path = Path(OUT_DIR) / "training_metadata.json"
 metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
