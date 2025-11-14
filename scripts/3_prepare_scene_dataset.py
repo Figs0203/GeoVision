@@ -1,12 +1,26 @@
 import argparse
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from preprocessing.geo_dataset import (
+    compute_lat_bin,
+    compute_lon_bin,
+    NUM_LAT_BINS,
+    NUM_LON_BINS,
+    UNKNOWN_BIN,
+)
 
 VALID_SCENES: Set[str] = {"indoor", "outdoor"}
 CONTINENT_NORMALIZATION: Dict[str, str] = {
@@ -27,6 +41,12 @@ def main() -> None:
         type=Path,
         default=Path("outputs/scene_predictions.csv"),
         help="CSV generado por run_scene_filter con columnas filename, scene_type, continent.",
+    )
+    parser.add_argument(
+        "--coords-csv",
+        type=Path,
+        default=Path("coords_with_continent.csv"),
+        help="CSV con columnas filename, lat, lon.",
     )
     parser.add_argument(
         "--scenes",
@@ -122,6 +142,15 @@ def main() -> None:
     df = pd.read_csv(args.csv)
     _validate_csv(df)
 
+    coords_df = pd.read_csv(args.coords_csv)
+    coords_df = coords_df.rename(columns={"filename": "base_filename"})
+    coords_df["base_filename"] = coords_df["base_filename"].apply(lambda p: Path(p).name)
+
+    df["base_filename"] = df["filename"].apply(lambda p: Path(p).name)
+    df = df.merge(coords_df[["base_filename", "lat", "lon"]], on="base_filename", how="left")
+    df["lat_bin"] = df["lat"].apply(compute_lat_bin)
+    df["lon_bin"] = df["lon"].apply(compute_lon_bin)
+
     selected_scenes = set(args.scenes)
     df = df[df["scene_type"].isin(selected_scenes)].copy()
     if df.empty:
@@ -134,10 +163,12 @@ def main() -> None:
     print(df.groupby(["scene_type", "continent"]).size())
 
     scene_dir = args.dest_dir.resolve()
+    metadata_dir = args.split_base.resolve() / "metadata"
     if args.clean_dest and scene_dir.exists():
         print(f"Limpiando directorio destino {scene_dir}")
         shutil.rmtree(scene_dir)
     scene_dir.mkdir(parents=True, exist_ok=True)
+    metadata_dir.mkdir(parents=True, exist_ok=True)
 
     missing_files = []
     copied = 0
@@ -145,6 +176,7 @@ def main() -> None:
     duplicates = 0
 
     source_dir = args.source_dir.resolve()
+    metadata_lookup: Dict[str, Dict[str, object]] = {}
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Reorganizando imágenes"):
         src = (source_dir / row["filename"]).resolve()
         if not src.exists():
@@ -166,6 +198,16 @@ def main() -> None:
             shutil.copy2(src, dest)
         copied += 1
 
+        rel_key = str(dest.relative_to(scene_dir))
+        metadata_lookup[rel_key] = {
+            "scene_type": row["scene_type"],
+            "continent": row["continent"],
+            "label_scene": row["continent"],
+            "label_combined": f"{row['scene_type']}-{row['continent']}",
+            "lat_bin": int(row["lat_bin"]) if not pd.isna(row["lat_bin"]) else UNKNOWN_BIN,
+            "lon_bin": int(row["lon_bin"]) if not pd.isna(row["lon_bin"]) else UNKNOWN_BIN,
+        }
+
     print(
         f"\nResumen: copiados/movidos={copied}, omitidos={skipped}, duplicados={duplicates}, faltantes={len(missing_files)}"
     )
@@ -174,16 +216,19 @@ def main() -> None:
         for sample in missing_files[:10]:
             print(f"  - {sample}")
 
-    split_dirs = _generate_splits(
+    split_info = _generate_splits(
         scene_dir=scene_dir,
         split_base=args.split_base.resolve(),
+        metadata_lookup=metadata_lookup,
+        metadata_dir=metadata_dir,
         test_size=args.split_size,
         seed=args.split_seed,
         clean=args.clean_splits,
     )
     _create_combined_scene_continent_dataset(
-        split_dirs=split_dirs,
+        split_info=split_info,
         output_base=args.split_base.resolve(),
+        metadata_dir=metadata_dir,
         clean=args.clean_splits,
     )
 
@@ -191,14 +236,16 @@ def main() -> None:
 def _generate_splits(
     scene_dir: Path,
     split_base: Path,
+    metadata_lookup: Dict[str, Dict[str, object]],
+    metadata_dir: Path,
     test_size: float,
     seed: int,
     clean: bool,
-) -> List[Tuple[str, Path, Path]]:
+) -> List[Dict[str, object]]:
     if not scene_dir.exists():
         raise FileNotFoundError(f"No se encontró el directorio de escenas: {scene_dir}")
 
-    split_dirs: List[Tuple[str, Path, Path]] = []
+    split_info: List[Dict[str, object]] = []
     for scene_path in scene_dir.iterdir():
         if not scene_path.is_dir():
             continue
@@ -213,6 +260,9 @@ def _generate_splits(
                     shutil.rmtree(d)
         train_dir.mkdir(parents=True, exist_ok=True)
         test_dir.mkdir(parents=True, exist_ok=True)
+
+        train_records: List[Dict[str, object]] = []
+        test_records: List[Dict[str, object]] = []
 
         for continent_path in scene_path.iterdir():
             if not continent_path.is_dir():
@@ -234,26 +284,67 @@ def _generate_splits(
             dest_test.mkdir(parents=True, exist_ok=True)
 
             for src in train_imgs:
-                shutil.copy2(src, dest_train / src.name)
+                target = dest_train / src.name
+                shutil.copy2(src, target)
+                rel_key = str(src.relative_to(scene_dir))
+                info = metadata_lookup.get(rel_key, {})
+                train_records.append(
+                    {
+                        "relative_path": str(target.relative_to(train_dir)),
+                        "scene_type": scene,
+                        "continent": continent_path.name,
+                        "label_name": info.get("label_scene", continent_path.name),
+                        "lat_bin": info.get("lat_bin", UNKNOWN_BIN),
+                        "lon_bin": info.get("lon_bin", UNKNOWN_BIN),
+                    }
+                )
             for src in test_imgs:
-                shutil.copy2(src, dest_test / src.name)
+                target = dest_test / src.name
+                shutil.copy2(src, target)
+                rel_key = str(src.relative_to(scene_dir))
+                info = metadata_lookup.get(rel_key, {})
+                test_records.append(
+                    {
+                        "relative_path": str(target.relative_to(test_dir)),
+                        "scene_type": scene,
+                        "continent": continent_path.name,
+                        "label_name": info.get("label_scene", continent_path.name),
+                        "lat_bin": info.get("lat_bin", UNKNOWN_BIN),
+                        "lon_bin": info.get("lon_bin", UNKNOWN_BIN),
+                    }
+                )
 
         train_count = sum(len(list((train_dir / c).glob("*.*"))) for c in os.listdir(train_dir))
         test_count = sum(len(list((test_dir / c).glob("*.*"))) for c in os.listdir(test_dir))
         print(
             f"Generados splits para escena '{scene}': {train_count} imágenes en train, {test_count} en test."
         )
-        split_dirs.append((scene, train_dir, test_dir))
 
-    return split_dirs
+        train_meta_path = metadata_dir / f"train_{scene}_metadata.csv"
+        test_meta_path = metadata_dir / f"test_{scene}_metadata.csv"
+        pd.DataFrame(train_records).to_csv(train_meta_path, index=False)
+        pd.DataFrame(test_records).to_csv(test_meta_path, index=False)
+
+        split_info.append(
+            {
+                "scene": scene,
+                "train_dir": train_dir,
+                "test_dir": test_dir,
+                "train_metadata": train_meta_path,
+                "test_metadata": test_meta_path,
+            }
+        )
+
+    return split_info
 
 
 def _create_combined_scene_continent_dataset(
-    split_dirs: List[Tuple[str, Path, Path]],
+    split_info: List[Dict[str, object]],
     output_base: Path,
+    metadata_dir: Path,
     clean: bool,
 ) -> None:
-    if not split_dirs:
+    if not split_info:
         print("No se generaron splits de escena; se omite dataset combinado.")
         return
 
@@ -267,31 +358,64 @@ def _create_combined_scene_continent_dataset(
     train_combined.mkdir(parents=True, exist_ok=True)
     test_combined.mkdir(parents=True, exist_ok=True)
 
-    def _copy_split(src_root: Path, dest_root: Path, scene: str) -> int:
-        copied = 0
-        for continent_dir in src_root.iterdir():
-            if not continent_dir.is_dir():
-                continue
-            combined_label = f"{scene}-{continent_dir.name}"
-            dest_dir = dest_root / combined_label
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            for img_path in continent_dir.glob("*.*"):
-                dest_path = dest_dir / img_path.name
-                if dest_path.exists():
-                    continue
-                shutil.copy2(img_path, dest_path)
-                copied += 1
-        return copied
+    combined_train_records: List[Dict[str, object]] = []
+    combined_test_records: List[Dict[str, object]] = []
 
-    total_train = 0
-    total_test = 0
-    for scene, train_dir, test_dir in split_dirs:
-        total_train += _copy_split(train_dir, train_combined, scene)
-        total_test += _copy_split(test_dir, test_combined, scene)
+    for info in split_info:
+        scene = info["scene"]
+        train_dir: Path = info["train_dir"]
+        test_dir: Path = info["test_dir"]
+
+        train_meta = pd.read_csv(info["train_metadata"])
+        test_meta = pd.read_csv(info["test_metadata"])
+
+        for record in train_meta.to_dict("records"):
+            src_path = train_dir / record["relative_path"]
+            combined_label = f"{scene}-{record['continent']}"
+            dest_dir = train_combined / combined_label
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = dest_dir / Path(record["relative_path"]).name
+            shutil.copy2(src_path, dest_path)
+            combined_train_records.append(
+                {
+                    "relative_path": str(dest_path.relative_to(train_combined)),
+                    "scene_type": scene,
+                    "continent": record["continent"],
+                    "label_name": combined_label,
+                    "lat_bin": record.get("lat_bin", UNKNOWN_BIN),
+                    "lon_bin": record.get("lon_bin", UNKNOWN_BIN),
+                }
+            )
+
+        for record in test_meta.to_dict("records"):
+            src_path = test_dir / record["relative_path"]
+            combined_label = f"{scene}-{record['continent']}"
+            dest_dir = test_combined / combined_label
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest_path = dest_dir / Path(record["relative_path"]).name
+            shutil.copy2(src_path, dest_path)
+            combined_test_records.append(
+                {
+                    "relative_path": str(dest_path.relative_to(test_combined)),
+                    "scene_type": scene,
+                    "continent": record["continent"],
+                    "label_name": combined_label,
+                    "lat_bin": record.get("lat_bin", UNKNOWN_BIN),
+                    "lon_bin": record.get("lon_bin", UNKNOWN_BIN),
+                }
+            )
+
+    pd.DataFrame(combined_train_records).to_csv(
+        metadata_dir / "train_scene_continent_metadata.csv", index=False
+    )
+    pd.DataFrame(combined_test_records).to_csv(
+        metadata_dir / "test_scene_continent_metadata.csv", index=False
+    )
 
     print(
         f"Dataset combinado generado en {train_combined.parent}: "
-        f"{total_train} imágenes en train_scene_continent, {total_test} en test_scene_continent."
+        f"{len(combined_train_records)} imágenes en train_scene_continent, "
+        f"{len(combined_test_records)} en test_scene_continent."
     )
 
 
@@ -308,4 +432,3 @@ def _normalize_continent(continent: str) -> str:
 
 if __name__ == "__main__":
     main()
-
