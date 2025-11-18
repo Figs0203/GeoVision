@@ -21,10 +21,14 @@ GeoVision utiliza un modelo Vision Transformer (ViT) pre-entrenado y fine-tunead
   - ~75% F1-score con CLIP fusionado
   - ~70% F1-score sin CLIP (solo ViT + geolocalización)
 - **Técnicas Avanzadas**: 
-  - Data augmentation con Albumentations
-  - Class balancing con WeightedRandomSampler
+  - Data augmentation agresiva con Albumentations (rotación, color jitter, ruido gaussiano)
+  - Class balancing adaptativo con WeightedRandomSampler (ajuste de pesos para clases mayoritarias/minoritarias)
+  - Pérdida ponderada con pesos de clase (CrossEntropyLoss weighted)
+  - Dropout adicional (0.3) en el clasificador para reducir overfitting
+  - Regularización aumentada (weight decay: 0.02)
   - Mixed precision training (FP16)
-  - Early stopping para prevenir overfitting
+  - Early stopping estricto (patience=3) para prevenir overfitting
+  - Detección automática de overfitting (comparación train/test)
   - Scheduler cosine para optimización de learning rate
   - GPU acceleration
 
@@ -33,6 +37,8 @@ GeoVision utiliza un modelo Vision Transformer (ViT) pre-entrenado y fine-tunead
 ```
 GeoVision/
 ├── downloader_smart.py                   # Extracción inteligente de imágenes del shard
+├── integrate_streetview.py               # Integración incremental de Google Street View
+├── clean_streetview_errors.py            # Limpieza de imágenes procesadas incorrectamente
 ├── scripts/
 │   ├── 0_map_coords_to_continent.py      # Mapeo de coordenadas a continentes
 │   ├── 1_prepare_dataset_folders.py      # Organización inicial por continente
@@ -41,7 +47,8 @@ GeoVision/
 │   ├── 4_clip_compute_embeddings.py      # Generación de embeddings CLIP (opcional)
 │   ├── 5_train_vit_trainer.py            # Entrenamiento del modelo ViT con CLIP
 │   ├── 6_eval_metrics.py                 # Evaluación y métricas
-│   └── 7_predict_image.py                # Predicción en imágenes nuevas
+│   ├── 7_predict_image.py                # Predicción en imágenes nuevas
+│   └── verify_data_leakage.py            # Verificación de data leakage entre train/test
 ├── preprocessing/
 │   ├── scene_classifier.py               # Clasificador Places365 (indoor/outdoor)
 │   └── geo_dataset.py                    # Dataset con features geográficas y CLIP
@@ -137,6 +144,8 @@ Para una guía completa y detallada paso a paso, consulta **[GUIA_EJECUCION.md](
 
 ### Pipeline Completo (Resumen)
 
+**Opción A: Pipeline Tradicional (desde shards de Kaggle)**
+
 ```bash
 # 1. Extraer imágenes del shard
 python downloader_smart.py
@@ -172,6 +181,23 @@ python scripts/6_eval_metrics.py
 # 10. Predecir en nueva imagen
 python scripts/7_predict_image.py --image ruta/a/imagen.jpg
 ```
+
+**Opción B: Integrar Dataset de Google Street View (incremental)**
+
+```bash
+# 1. Integrar imágenes de Google Street View (reemplaza pasos 0-1 del pipeline tradicional)
+python integrate_streetview.py --streetview-dir GoogleStreetViewImages
+
+# 2. (Opcional) Clasificar imágenes nuevas como indoor/outdoor
+# Nota: Las imágenes de Street View se marcan automáticamente como outdoor
+python scripts/2_run_scene_filter.py
+
+# 3. Continuar desde el paso 5 del pipeline tradicional...
+python scripts/3_prepare_scene_dataset.py
+# ... (resto del pipeline igual)
+```
+
+**Nota:** `integrate_streetview.py` integra incrementalmente imágenes de Google Street View, mapea coordenadas a continentes automáticamente, y marca las imágenes como outdoor. Puede usarse en paralelo con el pipeline tradicional para aumentar el dataset.
 
 ## Descripción de Componentes
 
@@ -243,11 +269,19 @@ Entrena el modelo ViT con geolocalización y opcionalmente CLIP fusionado.
   - Embeddings geográficos (lat/lon bins, 32 dim cada uno)
   - Proyección CLIP (128 dim, si está habilitado)
 - Hiperparámetros:
-  - Learning rate: 3e-5
-  - Épocas: 12 (con early stopping, patience=5)
+  - Learning rate: 2e-5 (reducido para entrenamiento más conservador)
+  - Épocas: 12 (con early stopping, patience=3)
   - Batch size: 16
-  - Weight decay: 0.01
+  - Weight decay: 0.02 (aumentado para más regularización)
+  - Dropout adicional: 0.3 en el clasificador
   - Scheduler: cosine con warmup
+- Regularización contra overfitting:
+  - Class-weighted loss (ajuste automático de pesos para clases mayoritarias/minoritarias)
+  - Data augmentation más agresiva
+  - Early stopping más estricto (patience=3, threshold=0.0005)
+- Detección automática de overfitting:
+  - Compara métricas de train vs test al finalizar entrenamiento
+  - Muestra advertencias si la diferencia > 5% (leve) o > 10% (significativo)
 - Guarda checkpoints cada 500 steps
 - Early stopping basado en F1-score
 
@@ -269,7 +303,52 @@ Clasifica una imagen nueva por continente.
 - Carga modelo más reciente automáticamente
 - Soporta coordenadas geográficas opcionales (mejora precisión)
 - Genera embeddings CLIP on-the-fly si el modelo fue entrenado con CLIP
-- Muestra probabilidades para todas las clases
+- Muestra top-2 predicciones con sus confianzas
+- Soporta rutas como argumento posicional o flag `--image`
+
+### 10. Integración de Google Street View (`integrate_streetview.py`)
+
+Integra incrementalmente imágenes de Google Street View al dataset existente.
+
+**Características:**
+- Modo incremental: solo procesa nuevas imágenes
+- Detección automática de headers en CSV
+- Limpieza robusta de coordenadas (maneja formatos europeos, separadores múltiples, valores extremos)
+- Mapeo automático de coordenadas a continentes
+- Mantiene correspondencia 1:1 entre CSV e imágenes (crítico)
+- Marca automáticamente como "outdoor" en `scene_predictions.csv`
+- Evita duplicados basándose en nombres de archivo existentes
+- Busca CSV en `streetview_dir/coordsSV.csv` o `streetview_dir/dataset/coordsSV.csv`
+
+**Uso:**
+```bash
+python integrate_streetview.py --streetview-dir GoogleStreetViewImages --auto-mark-outdoor
+```
+
+### 11. Limpieza de Errores (`clean_streetview_errors.py`)
+
+Limpia imágenes procesadas incorrectamente por versiones anteriores de `integrate_streetview.py`.
+
+**Características:**
+- Identifica imágenes procesadas desde un índice específico
+- Elimina imágenes de directorios `images/` y `data/images_by_continent/`
+- Actualiza CSVs (`coords.csv`, `coords_with_continent.csv`, `scene_predictions.csv`)
+- Modo `--dry-run` para preview de cambios
+
+**Uso:**
+```bash
+python clean_streetview_errors.py --streetview-start-index 5000
+```
+
+### 12. Verificación de Data Leakage (`scripts/verify_data_leakage.py`)
+
+Verifica independientemente que no haya data leakage entre train y test.
+
+**Características:**
+- Verifica duplicados por nombre de archivo
+- Verifica duplicados por contenido (MD5 hash)
+- Reporta distribución de clases en train y test
+- Útil para validar la calidad del split generado por `scripts/3_prepare_scene_dataset.py`
 
 ## Resultados
 
@@ -348,10 +427,12 @@ CLIP Embedding → Proyección → [128 dim]
 **Procesamiento:**
 1. Extracción de imágenes JPEG desde MessagePack
 2. Mapeo de coordenadas GPS a continentes
-3. Clasificación indoor/outdoor (Places365)
-4. Filtrado de imágenes con baja confianza (< 0.6) y `unknown`
-5. Filtrado de imágenes `indoor` (opcional, recomendado: solo outdoor)
-6. División estratificada 80/20 train/test (persistente)
+3. (Opcional) Integración incremental de Google Street View
+4. Clasificación indoor/outdoor (Places365)
+5. Filtrado de imágenes con baja confianza (< 0.6) y `unknown`
+6. Filtrado de imágenes `indoor` (opcional, recomendado: solo outdoor)
+7. División estratificada 80/20 train/test (persistente)
+8. Verificación de data leakage (duplicados por nombre y contenido)
 
 ## Tecnologías Utilizadas
 
@@ -383,6 +464,11 @@ CLIP Embedding → Proyección → [128 dim]
 
 ## Mejoras Futuras
 
+- [x] Integración incremental de Google Street View
+- [x] Detección automática de overfitting durante entrenamiento
+- [x] Class-weighted loss para balancear clases
+- [x] Data augmentation más agresiva
+- [x] Verificación de data leakage
 - [ ] Incorporar más shards para aumentar dataset (100K+ imágenes)
 - [ ] Experimentar con modelos más grandes (ViT-Large, Swin Transformer)
 - [ ] Fine-tuning de CLIP en lugar de solo proyección
