@@ -23,17 +23,36 @@ build/
 
 # Datos e Imágenes (muy pesados)
 data/images_by_continent/
+data/images_by_scene/
 data/pruebas/
+data/train_*/
+data/test_*/
+data/clip_embeddings/*.npz
+shards/
 shards/shard_*.msg
 shards/images_shard*/
+images/
 *.jpg
 *.jpeg
 *.png
 *.gif
 !outputs/confusion_matrix.png
+!preprocessing/__init__.py
+
+# CSV grandes (generados)
+coords.csv
+coords_with_continent.csv
+outputs/scene_predictions.csv
 
 # Modelos entrenados (muy pesados)
 outputs/checkpoints/
+models/places365/*.pth
+models/places365/resnet50_places365.pth
+
+# Google Street View (datos, no scripts)
+GoogleStreetViewImages/dataset/
+GoogleStreetViewImages/*.csv
+GoogleStreetViewImages.zip
 
 # Archivos temporales
 *.log
