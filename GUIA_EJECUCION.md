@@ -18,10 +18,10 @@ Antes de comenzar, asegúrate de tener:
 
 ## 🔧 Instalación
 
-### 1. Clonar el repositorio (si aplica)
+### 1. Clonar el repositorio
 
 ```bash
-git clone <url-del-repositorio>
+git clone https://github.com/Figs0203/GeoVision.git
 cd GeoVision
 ```
 
