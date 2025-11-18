@@ -236,11 +236,13 @@ python scripts/5_train_vit_trainer.py
    Si seleccionaste "y", proporciona las rutas a los archivos `.npz` generados en el Paso 6.
 
 **Hiperparámetros:**
-- Learning rate: 3e-5
-- Épocas: 12 (con early stopping, patience=5)
+- Learning rate: 2e-5
+- Épocas: 12 (con early stopping, patience=3)
 - Batch size: 16
+- Weight decay: 0.02
 - Balanceo de clases automático
-- Augmentación de datos (rotación, flip, ajustes de color)
+- Augmentación de datos (rotación, flip, ajustes de color, ruido gaussiano)
+- Detección automática de overfitting
 
 **Tiempo estimado:** 2-4 horas con GPU (RTX 3050), 10-15 horas con CPU (no recomendado)
 
@@ -372,17 +374,18 @@ Si tienes un dataset de Google Street View (todas las imágenes son outdoor):
 
 2. **Integrar el dataset:**
    ```bash
-   python integrate_streetview.py
+   python integrate_streetview.py --streetview-dir GoogleStreetViewImages --auto-mark-outdoor
    ```
    
    **¿Qué hace?**
-   - Lee `GoogleStreetViewImages/coordsSV.csv` y las imágenes de `GoogleStreetViewImages/dataset/`
+   - Busca `coordsSV.csv` en `GoogleStreetViewImages/` o `GoogleStreetViewImages/dataset/`
+   - Busca imágenes en `GoogleStreetViewImages/dataset/` o `GoogleStreetViewImages/`
+   - Limpia coordenadas automáticamente (maneja formatos europeos, valores extremos, etc.)
    - Mapea coordenadas a continentes automáticamente
-   - Copia y convierte imágenes (PNG → JPG si es necesario)
-   - Organiza imágenes en `data/images_by_continent/<continent>/`
+   - Copia y organiza imágenes en `data/images_by_continent/<continent>/`
    - Actualiza `coords.csv` y `coords_with_continent.csv` incrementalmente
    - **Marca automáticamente todas las imágenes como 'outdoor'** en `outputs/scene_predictions.csv`
-   - **Modo incremental:** Solo procesa imágenes nuevas (detecta último índice usado)
+   - **Modo incremental:** Solo procesa imágenes nuevas (evita duplicados por nombre de archivo)
 
 3. **Continuar con el pipeline:**
    - **NO necesitas ejecutar** `scripts/2_run_scene_filter.py` (ya están marcadas como outdoor)
@@ -398,7 +401,7 @@ Si tienes un dataset de Google Street View (todas las imágenes son outdoor):
 **Ejemplo de uso:**
 ```bash
 # Integrar Street View
-python integrate_streetview.py
+python integrate_streetview.py --streetview-dir GoogleStreetViewImages --auto-mark-outdoor
 
 # Reorganizar splits (seleccionar [1] outdoor)
 python scripts/3_prepare_scene_dataset.py
@@ -451,7 +454,7 @@ python scripts/7_predict_image.py --image foto.jpg            # Paso 9: Predecir
 
 ```bash
 # Integrar Street View (todas outdoor, no necesita script 2)
-python integrate_streetview.py                                # Integra dataset de Street View
+python integrate_streetview.py --streetview-dir GoogleStreetViewImages --auto-mark-outdoor
 python scripts/3_prepare_scene_dataset.py                     # Reorganizar splits (seleccionar [1] outdoor)
 # Continúa con Pasos 6-9 si necesitas reentrenar
 ```
